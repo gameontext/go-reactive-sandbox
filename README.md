@@ -1,3 +1,7 @@
+** This forked repository creates a customized image of the lightbend
+reactive sandbox to assist developers in the creation of advanced
+adventures with microservices. **
+
 # reactive-sandbox
 
 This project is a component of [Lightbend Orchestration for Kubernetes](https://developer.lightbend.com/docs/lightbend-orchestration-kubernetes/latest/). Refer to its documentation for usage, examples, and reference information.
