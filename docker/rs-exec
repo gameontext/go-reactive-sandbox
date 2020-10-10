@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 set -e
 
@@ -8,20 +8,11 @@ set -e
 
 ip="$(grep "$HOSTNAME" /etc/hosts|awk '{print $1}')"
 
-cassandra_heap="$(expr ${RS_CASSANDRA_HEAP:-256} + 0)"
-elasticsearch_heap="$(expr ${RS_ELASTICSEARCH_HEAP:-256} + 0)"
 kafka_heap="$(expr ${RS_KAFKA_HEAP:-256} + 0)"
 zookeeper_heap="$(expr ${RS_ZOOKEEPER_HEAP:-256} + 0)"
 
-echo "Cassandra:     $([ "$RS_ENABLE_CASSANDRA"     != 0 ] && echo "Enabled (Heap: ${cassandra_heap}m)"     || echo "Disabled")"
-echo "Elasticsearch: $([ "$RS_ENABLE_ELASTICSEARCH" != 0 ] && echo "Enabled (Heap: ${elasticsearch_heap}m)" || echo "Disabled")"
-echo "Kafka:         $([ "$RS_ENABLE_KAFKA"         != 0 ] && echo "Enabled (Heap: ${kafka_heap}m)"         || echo "Disabled")"
-echo "ZooKeeper:     $([ "$RS_ENABLE_ZOOKEEPER"     != 0 ] && echo "Enabled (Heap: ${zookeeper_heap}m)"     || echo "Disabled")"
-
-[ "$RS_ENABLE_CASSANDRA"     = 0 ] && rm -rf /etc/supervisor.d/cassandra.ini     || true
-[ "$RS_ENABLE_ELASTICSEARCH" = 0 ] && rm -rf /etc/supervisor.d/elasticsearch.ini || true
-[ "$RS_ENABLE_KAFKA"         = 0 ] && rm -rf /etc/supervisor.d/kafka.ini         || true
-[ "$RS_ENABLE_ZOOKEEPER"     = 0 ] && rm -rf /etc/supervisor.d/zookeeper.ini     || true
+echo "Kafka:         Enabled (Heap: ${kafka_heap}m)" 
+echo "ZooKeeper:     Enabled (Heap: ${zookeeper_heap}m)"
 
 #
 # Configure ZooKeeper
@@ -41,61 +32,6 @@ touch /opt/zookeeper/conf/java.env
 cat << EOT > /opt/zookeeper/conf/java.env
 
 ZK_SERVER_HEAP=$zookeeper_heap
-EOT
-
-#
-# Configure Cassandra
-#
-
-mkdir -p /data/cassandra
-
-touch /opt/cassandra/conf/cassandra.yaml
-sed -i -e "s/num_tokens/\#num_tokens/" /opt/cassandra/conf/cassandra.yaml
-sed -i -e "s/^rpc_address.*/rpc_address: $ip/" /opt/cassandra/conf/cassandra.yaml
-sed -i -e "s/^listen_address.*/listen_address: $ip/" /opt/cassandra/conf/cassandra.yaml
-sed -i -e 's/- seeds: "127.0.0.1"/- seeds: "'"$ip"'"/' /opt/cassandra/conf/cassandra.yaml
-
-cat <<EOT >> /opt/cassandra/conf/cassandra.yaml
-
-initial_token: 0
-rpc_server_type: hsha
-concurrent_reads: 2
-concurrent_writes: 2
-concurrent_compactors: 1
-compaction_throughput_mb_per_sec: 0
-key_cache_size_in_mb: 0
-rpc_min_threads: 1
-rpc_max_threads: 1
-
-data_file_directories:
-    - /data/cassandra
-EOT
-
-touch /opt/cassandra/conf/cassandra-env.sh
-cat <<EOT >> /opt/cassandra/conf/cassandra-env.sh
-
-JVM_OPTS="\$JVM_OPTS -Dcassandra.skip_wait_for_gossip_to_settle=0 -Xmx${cassandra_heap}M -Xms${cassandra_heap}M"
-EOT
-
-#
-# Configure elasticsearch
-#
-
-mkdir -p /data/elasticsearch
-
-touch /opt/elasticsearch/config/elasticsearch.yml
-cat <<EOT >> /opt/elasticsearch/config/elasticsearch.yml
-
-network.host: $ip
-discovery.type: single-node
-path.data: /data/elasticsearch
-EOT
-
-touch /opt/elasticsearch/config/jvm.options
-cat <<EOT >> /opt/elasticsearch/config/jvm.options
-
--Xms${elasticsearch_heap}m
--Xmx${elasticsearch_heap}m
 EOT
 
 #
@@ -120,8 +56,35 @@ exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
 EOT
 chmod +x /opt/kafka/bin/kafka
 
-# Directories & Permissions
-chown -R reactive-sandbox /data
 
-# Start
-exec supervisord -n -c /etc/supervisord.conf
+# Initial service start..
+/opt/kafka/bin/kafka > /dev/stdout 2>&1 &
+KAFKA_PID=$!
+KAFKA_START_TIME=$(cut -d ' ' -f 22 /proc/$KAFKA_PID/stat)
+/opt/zookeeper/bin/zkServer.sh start-foreground > /dev/stdout 2>&1 &
+ZOOKEEPER_PID=$!
+ZOOKEEPER_START_TIME=$(cut -d ' ' -f 22 /proc/$ZOOKEEPER_PID/stat)
+
+# Wait for a bg process to exit 
+wait -n
+
+while [ 1 -eq 1 ]; do
+
+    # figure out which bg process just quit, and relaunch it. 
+
+    if [ "$(cut -d ' ' -f 22 /proc/$KAFKA_PID/stat 2>/dev/null)" = "$KAFKA_START_TIME" ]; then
+        /opt/kafka/bin/kafka > /dev/stdout 2>&1 &
+        KAFKA_PID=$!
+        KAFKA_START_TIME=$(cut -d ' ' -f 22 /proc/$KAFKA_PID/stat)
+    fi
+
+    if [ "$(cut -d ' ' -f 22 /proc/$ZOOKEEPER_PID/stat 2>/dev/null)" = "$ZOOKEEPER_START_TIME" ]; then
+        sh -x /opt/zookeeper/bin/zkServer.sh start-foreground > /dev/stdout 2>&1 &
+        ZOOKEEPER_PID=$!
+        ZOOKEEPER_START_TIME=$(cut -d ' ' -f 22 /proc/$ZOOKEEPER_PID/stat)
+    fi
+
+    # wait again for a bg process to exit.
+    wait -n
+
+done
